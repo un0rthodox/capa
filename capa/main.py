@@ -290,7 +290,12 @@ class UnsupportedRuntimeError(RuntimeError):
 
 
 def get_extractor_py3(path, format, disable_progress=False):
-    raise UnsupportedRuntimeError()
+    import capa.features.extractors.miasm
+
+    with open(path, "rb") as f:
+        buf = f.read()
+
+    return capa.features.extractors.miasm.MiasmFeatureExtractor(buf)
 
 
 def get_extractor(path, format, disable_progress=False):
