@@ -53,6 +53,7 @@ class CapaExplorerIdaHooks(idaapi.UI_Hooks):
         @param prev_ea: prev location
         """
         self.screen_ea_changed_hook(idaapi.get_current_widget(), curr_ea, prev_ea)
+        # TODO update rulegen if selected
 
     def reset(self):
         """reset internal state"""

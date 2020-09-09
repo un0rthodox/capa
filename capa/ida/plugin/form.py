@@ -12,6 +12,7 @@ import logging
 import collections
 
 import idaapi
+import ida_kernwin
 import ida_settings
 from PyQt5 import QtGui, QtCore, QtWidgets
 
@@ -39,6 +40,7 @@ class CapaExplorerForm(idaapi.PluginForm):
 
         self.form_title = name
         self.rule_path = ""
+        self.extractor = capa.features.extractors.ida.IdaFeatureExtractor()
 
         self.parent = None
         self.ida_hooks = None
@@ -56,6 +58,11 @@ class CapaExplorerForm(idaapi.PluginForm):
         self.view_attack = None
         self.view_tabs = None
         self.view_menu_bar = None
+
+        # rule generator
+        self.layout_rulegen = None
+        self.rulegen_feature_tree = None
+        self.rulegen_text = None
 
     def OnCreate(self, form):
         """called when plugin form is created"""
@@ -102,6 +109,7 @@ class CapaExplorerForm(idaapi.PluginForm):
 
         self.view_tree = CapaExplorerQtreeView(self.search_model_proxy, self.parent)
         self.load_view_attack()
+        self.load_view_rulegen()
 
         # load parent tab and children tab views
         self.load_view_tabs()
@@ -109,6 +117,7 @@ class CapaExplorerForm(idaapi.PluginForm):
         self.load_view_search_bar()
         self.load_view_tree_tab()
         self.load_view_attack_tab()
+        self.load_view_rulegen_tab()
 
         # load menu bar and sub menus
         self.load_view_menu_bar()
@@ -150,6 +159,110 @@ class CapaExplorerForm(idaapi.PluginForm):
         table.setStyleSheet("QTableWidget::item { padding: 25px; }")
 
         self.view_attack = table
+
+    def load_view_rulegen(self):
+        """load rule generator view"""
+        self.rulegen_feature_tree = QtWidgets.QTreeWidget()
+        self.rulegen_text = QtWidgets.QTextEdit()
+
+        self.reload_features_tree()
+
+        button_reset = QtWidgets.QPushButton('&Reset')
+        # TODO button_reset.clicked.connect(self.reset)
+
+        h_layout = QtWidgets.QHBoxLayout()
+        v_layout = QtWidgets.QVBoxLayout()
+
+        h_layout.addWidget(self.rulegen_feature_tree)
+        h_layout.addWidget(self.rulegen_text)
+
+        v_layout.addLayout(h_layout)
+        v_layout.addWidget(button_reset)
+
+        self.layout_rulegen = v_layout
+
+    def reload_features_tree(self):
+        self.reset_rulegen()
+        self.rulegen_feature_tree.clear()
+
+        features = self.get_features(idaapi.get_screen_ea())
+        # TODO remove print
+        print(features)
+
+        self.update_feature_tree(features)
+
+    def get_features(self, va):
+        f = self.get_function(va)
+        return self.get_function_features(self.extractor, f)
+
+    def get_function(self, va):
+        # data structure shared across functions yielded here.
+        # useful for caching analysis relevant across a single workspace.
+        ctx = {}
+
+        f = idaapi.get_func(va)
+        if not f:
+            logger.debug('not a function at 0x%x', va)
+            return None
+
+        setattr(f, "ctx", ctx)
+        return capa.features.extractors.ida.add_ea_int_cast(f)
+
+    def get_function_features(self, extractor, f):
+        function_features = collections.defaultdict(set)
+
+        for feature, va in extractor.extract_function_features(f):
+            function_features[feature].add(va)
+
+        for bb in extractor.get_basic_blocks(f):
+            for feature, va in extractor.extract_basic_block_features(f, bb):
+                function_features[feature].add(va)
+
+            for insn in extractor.get_instructions(f, bb):
+                for feature, va in extractor.extract_insn_features(f, bb, insn):
+                    function_features[feature].add(va)
+
+        return function_features
+
+    def reset_rulegen(self):
+        self.reset_rulegen_selection(self.rulegen_feature_tree)
+        # TODO set to original colors before new highlight
+        # self.reset_rulegen_colors = ...
+        self.rulegen_text.setText("")
+
+    def update_feature_tree(self, features):
+        self.rulegen_feature_tree.setHeaderLabels(['Feature', 'Virtual Address', 'Disassembly'])
+        # auto resize columns
+        self.rulegen_feature_tree.header().setSectionResizeMode(QtWidgets.QHeaderView.ResizeToContents)
+        self.rulegen_feature_tree.itemClicked.connect(self.on_rulegen_feature_clicked)
+
+        # TODO set tree with features
+
+        self.rulegen_feature_tree.update()
+
+    def on_rulegen_feature_clicked(self, it, col):
+        logger.debug('clicked: item %s, column %s, text %s', it, col, it.text(col))
+        # jump to address
+        if col == 1 and it.text(col):
+            va = int(it.text(col), 0x10)
+            if va:
+                ida_kernwin.jumpto(va)
+
+        # TODO highlight in disassembly
+
+        self.update_rule_text()
+
+    def update_rule_text(self):
+        # TODO
+        rule_text = "TODO"
+        self.rulegen_text.setText(rule_text)
+
+    def reset_rulegen_selection(self, tree):
+        iterator = QtWidgets.QTreeWidgetItemIterator(tree, QtWidgets.QTreeWidgetItemIterator.Checked)
+        while iterator.value():
+            item = iterator.value()
+            item.setCheckState(0, QtCore.Qt.Unchecked)  # column, state
+            iterator += 1
 
     def load_view_checkbox_limit_by(self):
         """load limit results by function checkbox"""
@@ -197,6 +310,13 @@ class CapaExplorerForm(idaapi.PluginForm):
         tab.setLayout(layout)
 
         self.view_tabs.addTab(tab, "MITRE")
+
+    def load_view_rulegen_tab(self):
+        """load rule generator view tab"""
+        tab = QtWidgets.QWidget()
+        tab.setLayout(self.layout_rulegen)
+
+        self.view_tabs.addTab(tab, "Rule Generator")
 
     def load_file_menu(self):
         """load file menu controls"""
@@ -363,7 +483,7 @@ class CapaExplorerForm(idaapi.PluginForm):
         meta = capa.ida.helpers.collect_metadata()
 
         capabilities, counts = capa.main.find_capabilities(
-            rules, capa.features.extractors.ida.IdaFeatureExtractor(), True
+            rules, self.extractor, True
         )
         meta["analysis"].update(counts)
 
