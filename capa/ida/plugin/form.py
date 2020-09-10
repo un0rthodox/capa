@@ -30,11 +30,47 @@ logger = logging.getLogger(__name__)
 settings = ida_settings.IDASettings("capa")
 
 
+class ProgressUpdater(QtCore.QObject):
+
+    progress = QtCore.pyqtSignal(str, int)
+
+    def __init__(self):
+        """ """
+        super(ProgressUpdater, self).__init__()
+
+    def update(self, text, value):
+        """ """
+        self.progress.emit(text, value)
+        idaapi.request_refresh(0xFFFFFFFF)
+
+
+class CapaExplorerIdaFeatureExtractor(capa.features.extractors.ida.IdaFeatureExtractor):
+    def __init__(self, progress):
+        super(CapaExplorerIdaFeatureExtractor, self).__init__()
+        self.progress = progress
+
+    def extract_function_features(self, f):
+        self.progress.update("Analyzing function at 0x%x" % f.start_ea, 1)
+        for (feature, ea) in capa.features.extractors.ida.function.extract_features(f):
+            yield feature, ea
+
+    def extract_basic_block_features(self, f, bb):
+        self.progress.update("Analyzing basic block at 0x%x" % f.start_ea, 1)
+        for (feature, ea) in capa.features.extractors.ida.basicblock.extract_features(f, bb):
+            yield feature, ea
+
+    def extract_insn_features(self, f, bb, insn):
+        self.progress.update("Analyzing instruction at 0x%x" % f.start_ea, 1)
+        for (feature, ea) in capa.features.extractors.ida.insn.extract_features(f, bb, insn):
+            yield feature, ea
+
+
 class CapaExplorerForm(idaapi.PluginForm):
     """form element for plugin interface"""
 
     def __init__(self, name):
         """initialize form elements"""
+        print("init")
         super(CapaExplorerForm, self).__init__()
 
         self.form_title = name
@@ -56,27 +92,21 @@ class CapaExplorerForm(idaapi.PluginForm):
         self.view_attack = None
         self.view_tabs = None
         self.view_menu_bar = None
-        self.view_rules_label = None
+        self.view_info_label = None
+        self.view_progress_bar = None
+        self.view_buttons = None
 
     def OnCreate(self, form):
         """called when plugin form is created"""
         self.parent = self.FormToPyQtWidget(form)
         self.parent.setWindowIcon(QICON)
-
-        # load interface elements
         self.load_interface()
-        self.load_capa_results()
         self.load_ida_hooks()
-
-        self.view_tree.reset_ui()
-
-        logger.debug("form created")
 
     def Show(self):
         """creates form if not already create, else brings plugin to front"""
-        logger.debug("form show")
-        return idaapi.PluginForm.Show(
-            self, self.form_title, options=(idaapi.PluginForm.WOPN_TAB | idaapi.PluginForm.WCLS_CLOSE_LATER)
+        super(CapaExplorerForm, self).Show(
+            self.form_title, options=(idaapi.PluginForm.WOPN_TAB | idaapi.PluginForm.WCLS_CLOSE_LATER)
         )
 
     def OnClose(self, form):
@@ -86,7 +116,6 @@ class CapaExplorerForm(idaapi.PluginForm):
         """
         self.unload_ida_hooks()
         self.ida_reset()
-        logger.debug("form closed")
 
     def load_interface(self):
         """load user interface"""
@@ -110,7 +139,9 @@ class CapaExplorerForm(idaapi.PluginForm):
         self.load_view_search_bar()
         self.load_view_tree_tab()
         self.load_view_attack_tab()
-        self.load_view_rules_label()
+        self.load_view_info_label()
+        self.load_view_progress_bar()
+        self.load_view_buttons()
 
         # load menu bar and sub menus
         self.load_view_menu_bar()
@@ -161,12 +192,22 @@ class CapaExplorerForm(idaapi.PluginForm):
 
         self.view_limit_results_by_function = check
 
-    def load_view_rules_label(self):
+    def load_view_info_label(self):
         """load rules label"""
         label = QtWidgets.QLabel()
         label.setAlignment(QtCore.Qt.AlignLeft)
+        label.setText("No rules loaded")
 
-        self.view_rules_label = label
+        self.view_info_label = label
+
+    def load_view_progress_bar(self):
+        """ """
+        bar = QtWidgets.QProgressBar(self.parent)
+        bar.setAlignment(QtCore.Qt.AlignLeft)
+        bar.setValue(0)
+        bar.setOrientation(QtCore.Qt.Horizontal)
+
+        self.view_progress_bar = bar
 
     def load_view_search_bar(self):
         """load the search bar control"""
@@ -176,13 +217,33 @@ class CapaExplorerForm(idaapi.PluginForm):
 
         self.view_search_bar = line
 
+    def load_view_buttons(self):
+        """ """
+        analyze_button = QtWidgets.QPushButton("Analyze")
+        reset_button = QtWidgets.QPushButton("Reset")
+
+        analyze_button.clicked.connect(self.slot_analyze)
+        reset_button.clicked.connect(self.slot_reset)
+
+        layout = QtWidgets.QHBoxLayout()
+        layout.addWidget(analyze_button)
+        layout.addWidget(reset_button)
+        layout.addStretch(1)
+
+        self.view_buttons = layout
+
+
     def load_view_parent(self):
         """load view parent"""
         layout = QtWidgets.QVBoxLayout()
 
         layout.addWidget(self.view_tabs)
-        layout.addWidget(self.view_rules_label)
+        layout.addWidget(self.view_info_label)
+        layout.addWidget(self.view_progress_bar)
+        layout.addLayout(self.view_buttons)
         layout.setMenuBar(self.view_menu_bar)
+
+        self.hide_progress()
 
         self.parent.setLayout(layout)
 
@@ -211,7 +272,7 @@ class CapaExplorerForm(idaapi.PluginForm):
     def load_file_menu(self):
         """load file menu controls"""
         actions = (
-            ("Rerun analysis", "Rerun capa analysis on current database", self.slot_reload),
+            #("Rerun analysis", "Rerun capa analysis on current database", self.slot_reload),
             ("Export results...", "Export capa results as JSON file", self.slot_export_json),
         )
         self.load_menu("File", actions)
@@ -223,8 +284,9 @@ class CapaExplorerForm(idaapi.PluginForm):
 
     def load_view_menu(self):
         """load view menu controls"""
-        actions = (("Reset view", "Reset plugin view", self.slot_reset),)
-        self.load_menu("View", actions)
+        pass
+        #actions = (("Reset view", "Reset plugin view", self.slot_reset),)
+        #self.load_menu("View", actions)
 
     def load_menu(self, title, actions):
         """load menu actions
@@ -336,10 +398,28 @@ class CapaExplorerForm(idaapi.PluginForm):
         """
         if post:
             capa.ida.helpers.inform_user_ida_ui("Running capa analysis again after rebase")
-            self.slot_reload()
+            self.slot_analyze()
 
     def load_capa_results(self):
         """run capa analysis and render results in UI"""
+        progress = ProgressUpdater()
+        progress.progress.connect(self.slot_progress)
+
+        extractor = CapaExplorerIdaFeatureExtractor(progress)
+
+        self.init_progress(5)
+        progress.update("Calculating analysis...", 0)
+
+        item_count = 5
+        for f in extractor.get_functions():
+            item_count += 1
+            for bb in extractor.get_basic_blocks(f):
+                item_count += 1
+                for _ in extractor.get_instructions(f, bb):
+                    item_count += 1
+
+        self.init_progress(item_count)
+        progress.update("Loading rules...", 1)
 
         # resolve rules directory - check self and settings first, then ask user
         if not self.rule_path:
@@ -349,7 +429,7 @@ class CapaExplorerForm(idaapi.PluginForm):
                 rule_path = self.ask_user_directory()
                 if not rule_path:
                     capa.ida.helpers.inform_user_ida_ui("You must select a rules directory to use for analysis.")
-                    logger.warning("no rules directory selected. nothing to do.")
+                    self.view_info_label.setText("No rules loaded")
                     return
                 self.rule_path = rule_path
                 settings.user["rule_path"] = rule_path
@@ -369,17 +449,19 @@ class CapaExplorerForm(idaapi.PluginForm):
             capa.ida.helpers.inform_user_ida_ui("Failed to load rules from %s" % self.rule_path)
             logger.error("failed to load rules from %s (%s)", self.rule_path, e)
             self.rule_path = ""
-            self.set_view_rules_label_default()
+            self.view_info_label.setText("No rules loaded")
+            self.hide_progress()
             return
 
-        self.set_view_rules_label_loaded(self.rule_path, rule_count)
+        progress.update("Analyzing program capabilities...", 1)
 
         meta = capa.ida.helpers.collect_metadata()
-
         capabilities, counts = capa.main.find_capabilities(
-            rules, capa.features.extractors.ida.IdaFeatureExtractor(), True
+            rules, extractor, True
         )
         meta["analysis"].update(counts)
+
+        progress.update("Checking for file limitations...", 1)
 
         # support binary files specifically for x86/AMD64 shellcode
         # warn user binary file is loaded but still allow capa to process it
@@ -402,15 +484,17 @@ class CapaExplorerForm(idaapi.PluginForm):
         if capa.main.has_file_limitation(rules, capabilities, is_standalone=False):
             capa.ida.helpers.inform_user_ida_ui("capa encountered warnings during analysis")
 
-        logger.debug("analysis completed.")
+        progress.update("Rendering results...", 1)
 
+        # convert results document, render views
         self.doc = capa.render.convert_capabilities_to_result_document(meta, rules, capabilities)
-
-        # render views
         self.model_data.render_capa_doc(self.doc)
         self.render_capa_doc_mitre_summary()
 
-        logger.debug("render views completed.")
+        progress.update("", 1)
+        self.hide_progress()
+
+        self.view_info_label.setText("Loaded %d rules from %s" % (rule_count, self.rule_path))
 
     def render_capa_doc_mitre_summary(self):
         """render MITRE ATT&CK results"""
@@ -471,18 +555,6 @@ class CapaExplorerForm(idaapi.PluginForm):
         item.setFont(font)
         return item
 
-    def set_view_rules_label_default(self):
-        """set view rules label to default default text"""
-        self.view_rules_label.setText("No rules loaded")
-
-    def set_view_rules_label_loaded(self, path, count):
-        """set view rules label to rule path/count
-
-        @param path: rule path
-        @param count: number of rules loaded from path
-        """
-        self.view_rules_label.setText("Loaded %d rules from %s" % (count, path))
-
     def ida_reset(self):
         """reset plugin UI
 
@@ -493,8 +565,8 @@ class CapaExplorerForm(idaapi.PluginForm):
         self.model_data.reset()
         self.view_tree.reset_ui()
 
-    def slot_reload(self):
-        """re-run capa analysis and reload UI controls
+    def slot_analyze(self):
+        """run capa analysis and reload UI controls
 
         called when user selects plugin reload from menu
         """
@@ -502,11 +574,7 @@ class CapaExplorerForm(idaapi.PluginForm):
         self.search_model_proxy.invalidate()
         self.model_data.clear()
         self.load_capa_results()
-
         self.ida_reset()
-
-        logger.debug("%s reload completed", self.form_title)
-        idaapi.info("%s reload completed." % self.form_title)
 
     def slot_reset(self, checked):
         """reset UI elements
@@ -514,9 +582,6 @@ class CapaExplorerForm(idaapi.PluginForm):
         e.g. checkboxes and IDA highlighting
         """
         self.ida_reset()
-
-        logger.debug("%s reset completed", self.form_title)
-        idaapi.info("%s reset completed" % self.form_title)
 
     def slot_menu_bar_hovered(self, action):
         """display menu action tooltip
@@ -583,4 +648,39 @@ class CapaExplorerForm(idaapi.PluginForm):
         settings.user["rule_path"] = rule_path
 
         if 1 == idaapi.ask_yn(1, "Run analysis now?"):
-            self.slot_reload()
+            self.slot_analyze()
+
+    def slot_progress(self, text, value):
+        """ """
+        if text:
+            self.set_view_info_label(text)
+        self.update_progress(value)
+
+    def init_progress(self, count, value=0):
+        """configure progress bar
+
+        show progress bar in UI once configured
+
+        @param count: number of items to track
+        @param value: initial progress value
+        """
+        self.view_progress_bar.reset()
+        self.view_progress_bar.setRange(0, count)
+        self.view_progress_bar.setValue(value)
+
+        self.view_progress_bar.show()
+
+    def update_progress(self, value):
+        """increase progress value
+
+        @param value: value to increase
+        """
+        self.view_progress_bar.setValue(self.view_progress_bar.value() + value)
+
+    def hide_progress(self):
+        """reset and hide progress bar"""
+        self.view_progress_bar.hide()
+
+    def set_view_info_label(self, text):
+        """set text displayed by information label"""
+        self.view_info_label.setText(text)
