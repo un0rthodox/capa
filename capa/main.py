@@ -21,6 +21,7 @@ import collections
 import halo
 import tqdm
 import colorama
+import ida_kernwin
 
 import capa.rules
 import capa.engine
@@ -351,7 +352,11 @@ def get_rules(rule_path, disable_progress=False):
 
     rules = []
 
+    i = 0
+    n = len(list(rule_paths))
     for rule_path in tqdm.tqdm(list(rule_paths), disable=disable_progress, desc="loading ", unit="     rules"):
+        i += 1
+        ida_kernwin.replace_wait_box("loading rule %d/%d" % (i, n))
         try:
             rule = capa.rules.Rule.from_yaml_file(rule_path)
         except capa.rules.InvalidRule:

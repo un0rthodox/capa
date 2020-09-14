@@ -12,6 +12,7 @@ import logging
 import collections
 
 import idaapi
+import ida_kernwin
 import ida_settings
 from PyQt5 import QtGui, QtCore, QtWidgets
 
@@ -381,8 +382,9 @@ class CapaExplorerForm(idaapi.PluginForm):
                 self.rule_path = rule_path
                 settings.user["rule_path"] = rule_path
 
+        ida_kernwin.show_wait_box("loading rules")
         try:
-            rules = capa.main.get_rules(self.rule_path, True)
+            rules = capa.main.get_rules(self.rule_path, disable_progress=True)
             rule_count = len(rules)
             rules = capa.rules.RuleSet(rules)
         except (IOError, capa.rules.InvalidRule, capa.rules.InvalidRuleSet) as e:
@@ -397,11 +399,13 @@ class CapaExplorerForm(idaapi.PluginForm):
             self.set_view_status_label("No rules loaded")
             self.disable_controls()
             return
+        finally:
+            ida_kernwin.hide_wait_box()
 
         meta = capa.ida.helpers.collect_metadata()
 
         capabilities, counts = capa.main.find_capabilities(
-            rules, capa.features.extractors.ida.IdaFeatureExtractor(), True
+            rules, capa.features.extractors.ida.IdaFeatureExtractor(), disable_progress=True
         )
         meta["analysis"].update(counts)
 
